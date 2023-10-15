@@ -197,6 +197,8 @@ module Net
     # version of this library
     VERSION = "0.1.2"
 
+    autoload :SASLClientAdapter, File.expand_path("pop/sasl_client_adapter")
+
     #
     # Class Parameters
     #
@@ -952,7 +954,20 @@ module Net
       +"#<#{self.class} socket=#{@socket}>"
     end
 
-    def auth(account, password)
+    # TODO: check capabilities and prefer SCRAM-SHA-256, SCRAM-SHA-1, or PLAIN
+    def auth(*args, type: nil, user: nil, pass: nil, **kwargs, &block)
+      if kwargs.empty? && block.nil?
+        args = [user, pass] if args.empty? && (user || pass)
+        type ||= :USER_PASS if args.length == 2
+      end
+      case type
+      when :USER_PASS then user_pass(*args)
+      when :APOP      then apop(*args)
+      else sasl_adapter.authenticate(*args, type: type, **kwargs, &block)
+      end
+    end
+
+    def user_pass(account, password)
       check_response_auth(critical {
         check_response_auth(get_response('USER %s', account))
         get_response('PASS %s', password)
@@ -969,6 +984,7 @@ module Net
       })
     end
 
+    def sasl_adapter; SASLClientAdapter.new(self) end
     def sasl_capable?(type) capable?("SASL", type) end
     def sasl_mechanisms; sasl_capable? || [] end
     def capabilities;  @capabilities ||= capa end
@@ -1060,6 +1076,22 @@ module Net
     def get_response(fmt, *fargs)
       @socket.writeline sprintf(fmt, *fargs)
       recv_response()
+    end
+
+    # Returns a successful "+OK" response line
+    #
+    # Yields continuation data and replies to the server using the block result.
+    #
+    # Raises an exception for any non-successful, non-continuation response.
+    def send_command_with_continuations(*args)
+      server_resp = critical { get_response args.join(" ") }
+      while /\A\+ ([a-zA-Z0-9+\/]+=?=?|)\z/.match? server_resp
+        critical {
+          client_resp = yield $1
+          server_resp =  get_response client_resp
+        }
+      end
+      check_response_auth server_resp
     end
 
     def recv_response
